@@ -58,6 +58,62 @@ struct Tablero{
 //Resultado de revisar si alguien gano
 enum Resultado{SinGanador, GanaPuma, GananPerros};
 
+//Parámetros del torneo que se pueden cambiar con config.txt
+struct Config{
+    //Retardo mínimo y máximo en ms entre los intentos de movimiento de una pieza
+    int retardo_min;
+    int retardo_max;
+    //Semilla de los números aleatorios, para poder repetir una prueba
+    unsigned int semilla;
+    //true si config.txt trajo una disposición inicial de las piezas
+    bool hay_disposicion;
+    //Casilla inicial del puma y de cada uno de los 12 perros
+    int casilla_puma;
+    int casillas_perros[num_perros];
+};
+
+//Una solicitud de movimiento, una pieza pide ir a una casilla
+struct Solicitud{
+    int pieza;
+    int destino;
+};
+
+//Declaración adelantada ArgPieza, necesita nombrar a Mesa antes de que Mesa se defina
+struct Mesa;
+
+//Lo que recibe el hilo de cada pieza, a que mesa pertenece y cual pieza es
+struct ArgPieza{
+    Mesa *mesa;
+    int pieza;
+};
+
+//Una mesa de juego, el tablero y todo lo necesario para sincronizar a las 13 piezas y al juez (ambos hilos)
+struct Mesa{
+    //Numero de mesa, para identificarla en el log
+    int numero;
+    //Copia de la configuración, solo se lee después de crearse
+    Config cfg;
+    //El tablero, solo se toca con el mutex tomado
+    Tablero tablero;
+    //Mutex de la mesa; protege el tablero, la cola de solicitudes y los datos de abajo
+    pthread_mutex_t mutex;
+    //Variable de condición, el juez duerme hasta que llegue una solicitud
+    pthread_cond_t hay_solicitud;
+    //Cola circular con las solicitudes de movimiento que esperan al juez
+    Solicitud cola[max_solicitudes];
+    //Posición de la solicitud mas antigua de la cola
+    int cola_cabeza;
+    //Solicitudes que hay en la cola
+    int cola_cantidad;
+    //true cuando la partida ya terminó
+    bool terminada;
+    //Muestra quien ganó, SinGanador si se esta jugando
+    Resultado resultado;
+    //Los 13 hilos de las piezas y los argumentos que recibe cada uno
+    pthread_t hilos[num_piezas];
+    ArgPieza args[num_piezas];
+};
+
 //Construcción de las tablas del tablero
 
 //Anota que la casilla b es vecina de la casilla a
