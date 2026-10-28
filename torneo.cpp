@@ -45,3 +45,54 @@ static int salto_destino[num_nodos][max_vecinos];
 //cuantos saltos posibles tiene cada casilla
 static int num_saltos[num_nodos];
 
+//Estado de una partida, quien esta en cada casilla y donde esta cada pieza
+struct Tablero{
+    //ocupante[o] es el numero de la pieza que esta en la casilla c
+    int ocupante[num_nodos];
+    //pos[p] es la casilla donde esta la pieza p
+    int pos[num_piezas];
+    //Perros capturados hasta ahora
+    int capturas;
+};
+
+//Resultado de revisar si alguien gano
+enum Resultado{SinGanador, GanaPuma, GananPerros};
+
+//Construcción de las tablas del tablero
+
+//Anota que la casilla b es vecina de la casilla a
+static void agregar_vecino(int a, int b){
+    vecinos[a][num_vecinos[a]] = b;
+    num_vecinos[a]++;
+}
+
+//Anota que desde la casilla a se puede saltar por encima de "medio" hasta "destino"
+static void agregar_salto(int a, int medio, int destino){
+    salto_medio[a][num_saltos[a]] = medio;
+    salto_destino[a][num_saltos[a]] = destino;
+    num_saltos[a]++;
+}
+
+//Llena las tablas de vecinos y saltos recorriendo cada linea del tablero
+static void construir_tablero(){
+    for(int l = 0; l < num_lineas; l++){
+        //Cuenta cuantas casillas tiene esta linea
+        int largo = 0;
+        while(lineas[l][largo] != -1){
+            largo++;
+        }
+        //Dos casillas seguidas en la linea son vecinas (en los dos sentidos)
+        for(int i = 0; i + 1 < largo; i++){
+            agregar_vecino(lineas[l][i], lineas[l][i + 1]);
+            agregar_vecino(lineas[l][i + 1], lineas[l][i]);
+        }
+        //Tres casillas seguidas forman un salto (en los dos sentidos)
+        for(int i = 0; i + 2 < largo; i++){
+            agregar_salto(lineas[l][i], lineas[l][i + 1], lineas[l][i + 2]);
+            agregar_salto(lineas[l][i + 2], lineas[l][i + 1], lineas[l][i]);
+        }
+    }
+}
+
+
+
