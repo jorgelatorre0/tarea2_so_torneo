@@ -91,6 +91,14 @@ struct ArgPieza{
 struct Mesa{
     //Numero de mesa, para identificarla en el log
     int numero;
+    int indice;
+    //Numero de la partida que se juega ahora en esta mesa y los dos jugadores
+    int partida;
+    int jugador_puma;
+    int jugador_perros;
+    //Hilo del juez de esta mesa, y si ya se lanzó (para saber si hay que hacerle join)
+    pthread_t hilo_juez;
+    bool hilo_lanzado;
     //Copia de la configuración, solo se lee después de crearse
     Config cfg;
     //El tablero, solo se toca con el mutex tomado
@@ -113,6 +121,29 @@ struct Mesa{
     pthread_t hilos[num_piezas];
     ArgPieza args[num_piezas];
 };
+
+//Datos del servidor compartidos por todos los hilos
+
+//Protege llegadas, quien_llego y mesa_libre
+static pthread_mutex_t mutex_servidor;
+//Hace que cada mensaje se imprima completo
+//El mutex de la mesa o el del servidor se toman antes que el de la consola, y con la consola tomada nunca se pide otro mutex (para evitar deadlock)
+static pthread_mutex_t mutex_consola;
+//Cuenta los clientes que ya llegaron y todavía no se emparejan
+static sem_t sem_llegadas;
+//Cuenta las mesas libres, partiendo en M
+static sem_t sem_mesas;
+//Cuantos clientes han llegado
+static int llegadas = 0;
+//quien_llego[k] es el número de jugador que tuvo la llegada k
+static int quien_llego[max_jugadores];
+//mesa_libre[i] es true si la mesa i no esta jugando
+static bool mesa_libre[max_mesas];
+//Mesas del torneo
+static Mesa mesas[max_mesas];
+//Numero de cada cliente y su hilo
+static int ids_clientes[max_jugadores];
+static pthread_t hilos_clientes[max_jugadores];
 
 //Construcción de las tablas del tablero
 
