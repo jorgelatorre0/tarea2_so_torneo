@@ -182,4 +182,132 @@ static void construir_tablero(){
 }
 
 
+//Preparación del tablero
+
+//Deja el tablero sin ninguna pieza y sin capturas
+static void vaciar_tablero(Tablero &t){
+    for(int c = 0; c < num_nodos; c++){
+        t.ocupante[c] = ninguno;
+    }
+    for(int p = 0; p < num_piezas; p++){
+        t.pos[p] = ninguno;
+    }
+    t.capturas = 0;
+}
+
+//Pone la pieza p en la casilla c
+static void colocar_pieza(Tablero &t, int p, int c){
+    t.pos[p] = c;
+    t.ocupante[c] = p;
+}
+
+//Pone la pieza p en la casilla c, pero solo si la casilla existe y esta libre, devuelve false si no se pudo
+static bool colocar_pieza_valida(Tablero &t, int p, int c){
+    if(c < 0 || c >= num_nodos)
+      return false;
+    if(t.ocupante[c] != ninguno)
+      return false;
+    colocar_pieza(t, p, c);
+    return true;
+}
+
+//Arma la disposición inicial de las piezas. Si config.txt trajo una, usa esa, si no, usa la de por defecto: el puma en el trono y los perros abajo (filas 3 y 4 completas y los dos extremos de la fila 2). Devuelve false si la disposición es invalida (casilla que no existe o repetida)
+static bool colocar_inicial(Tablero &t, Config &cfg){
+    vaciar_tablero(t);
+    int casilla_puma = 0;
+    int casillas_perros[num_perros] = {13, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27};
+    //Si el archivo de configuración trajo una disposición, reemplaza a la de por defecto
+    if(cfg.hay_disposicion){
+        casilla_puma = cfg.casilla_puma;
+        for(int i = 0; i < num_perros; i++){
+            casillas_perros[i] = cfg.casillas_perros[i];
+        }
+    }
+    if(!colocar_pieza_valida(t, 0, casilla_puma))
+      return false;
+    for(int i = 0; i < num_perros; i++){
+        if(!colocar_pieza_valida(t, i + 1, casillas_perros[i]))
+          return false;
+    }
+    return true;
+}
+
+//Reglas de movimiento y captura
+
+//Devuelve true si la casilla b es vecina de la casilla a
+static bool son_vecinas(int a, int b){
+    for(int k = 0; k < num_vecinos[a]; k++){
+        if(vecinos[a][k] == b)
+          return true;
+    }
+    return false;
+}
+
+//Un paso simple es válido si la pieza sigue en el tablero, el destino está vacío y es vecino de la casilla donde esta la pieza
+static bool paso_valido(Tablero &t, int pieza, int destino){
+    if(t.pos[pieza] == ninguno)
+      return false;
+    if(t.ocupante[destino] != ninguno)
+      return false;
+    return son_vecinas(t.pos[pieza], destino);
+}
+
+//Si el puma puede saltar hasta "destino" por encima de un perro, devuelve la casilla de ese perro. Si no puede, devuelve ninguno
+static int perro_saltado(Tablero &t, int destino){
+    int origen = t.pos[0];
+    //El puma tiene que estar en el tablero y el destino tiene que estar vacío
+    if(origen == ninguno || t.ocupante[destino] != ninguno)
+      return ninguno;
+    //Revisa los saltos posibles desde donde esta el puma
+    for(int k = 0; k < num_saltos[origen]; k++){
+        if(salto_destino[origen][k] == destino){
+            int medio = salto_medio[origen][k];
+            //Solo se salta si en el medio hay un perro (piezas 1 a 12)
+            if(t.ocupante[medio] >= 1)
+              return medio;
+        }
+    }
+    return ninguno;
+}
+
+//Mueve la pieza a una casilla destino
+static void mover_pieza(Tablero &t, int pieza, int destino){
+    t.ocupante[t.pos[pieza]] = ninguno;
+    t.pos[pieza] = destino;
+    t.ocupante[destino] = pieza;
+}
+
+//El puma salta hasta "destino" y captura al perro que estaba en casilla_perro
+static void capturar_perro(Tablero &t, int casilla_perro, int destino){
+    int perro = t.ocupante[casilla_perro];
+    t.pos[perro] = ninguno;
+    t.ocupante[casilla_perro] = ninguno;
+    mover_pieza(t, 0, destino);
+    t.capturas++;
+}
+
+//El puma esta acorralado si no puede dar ningún paso ni ningún salto
+static bool puma_acorralado(Tablero &t){
+    int origen = t.pos[0];
+    //Si alguna casilla vecina esta vacía, puede dar un paso
+    for(int k = 0; k < num_vecinos[origen]; k++){
+        if(t.ocupante[vecinos[origen][k]] == ninguno)
+          return false;
+    }
+    //Si puede saltar sobre algún perro, tampoco esta acorralado
+    for(int k = 0; k < num_saltos[origen]; k++){
+        if(perro_saltado(t, salto_destino[origen][k]) != ninguno)
+          return false;
+    }
+    return true;
+}
+
+//Revisa las condiciones de victoria
+static Resultado revisar_ganador(Tablero &t){
+    if(t.capturas >= capturas_para_ganar)
+      return GanaPuma;
+    if(puma_acorralado(t))
+      return GananPerros;
+    return SinGanador;
+}
 
