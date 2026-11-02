@@ -311,3 +311,193 @@ static Resultado revisar_ganador(Tablero &t){
     return SinGanador;
 }
 
+//Impresión del tablero
+
+//Letra que representa P puma, D perro, . vacia
+static char simbolo(Tablero &t, int casilla){
+    int p = t.ocupante[casilla];
+    if(p == ninguno)
+      return '.';
+    if(p == 0)
+      return 'P';
+    return 'D';
+}
+
+//Impresión del tablero con la forma de la figura del enunciado
+static void imprimir_tablero(Tablero &t){
+    cout << "      " << simbolo(t, 0) << endl;
+    cout << "    " << simbolo(t, 1) << "   " << simbolo(t, 2) << endl;
+    for(int fila = 0; fila < 5; fila++){
+        cout << "  ";
+        for(int col = 0; col < 5; col++){
+            cout << simbolo(t, 3 + fila * 5 + col) << " ";
+        }
+        cout << endl;
+    }
+}
+
+//Imprime Puma o Perro 
+static void imprimir_pieza(int pieza){
+    if(pieza == 0)
+      cout << "Puma";
+    else
+      cout << "Perro " << pieza;
+}
+
+//Elige al azar uno de los movimientos validos de la pieza, un paso a una casilla libre si es el puma, también un salto con captura. Devuelve ninguno si no tiene ningún movimiento. "estado" es el generador aleatorio de la pieza.
+//Se llama con el mutex de la mesa tomado, porque lee el tablero.
+static int elegir_destino(Tablero &t, int pieza, unsigned int &estado){
+    int origen = t.pos[pieza];
+    //Un paso por cada vecina y un salto por cada vecina, a lo más 2 * max_vecinos
+    int candidatos[2 * max_vecinos];
+    int cantidad = 0;
+    //Pasos, las casillas vecinas que están libres
+    for(int k = 0; k < num_vecinos[origen]; k++){
+        if(t.ocupante[vecinos[origen][k]] == ninguno){
+            candidatos[cantidad] = vecinos[origen][k];
+            cantidad++;
+        }
+    }
+    //Saltos, solo el puma y solo si hay un perro que saltar
+    if(pieza == 0){
+        for(int k = 0; k < num_saltos[origen]; k++){
+            if(perro_saltado(t, salto_destino[origen][k]) != ninguno){
+                candidatos[cantidad] = salto_destino[origen][k];
+                cantidad++;
+            }
+        }
+    }
+    if(cantidad == 0)
+      return ninguno;
+    //rand_r usa el estado, asi cada pieza tiene su propia secuencia
+    return candidatos[rand_r(&estado) % cantidad];
+}
+
+//Hilo de una pieza. Esperar un retardo aleatorio, elige un movimiento y PEDIR al juez que lo haga (poniendo una solicitud en la cola). La pieza nunca modifica el tablero, solo lo hace el juez.
+static void *hilo_pieza(void *arg){
+    //El argumento llega como puntero genérico 
+    ArgPieza &a = *(ArgPieza *)arg;
+    Mesa &mesa = *a.mesa;
+    int pieza = a.pieza;
+    //Semilla propia de esta pieza, calculada a partir de la semilla de la configuración
+    unsigned int estado = mesa.cfg.semilla + pieza;
+
+    while(true){
+        //Retardo aleatorio entre retardo_min y retardo_max, en milisegundos
+        int espera = mesa.cfg.retardo_min + rand_r(&estado) % (mesa.cfg.retardo_max - mesa.cfg.retardo_min + 1);
+        usleep(espera * 1000);
+
+        pthread_mutex_lock(&mesa.mutex);
+        //La pieza termina si la partida acabo o si la capturaron
+        if(mesa.terminada || mesa.tablero.pos[pieza] == ninguno){
+            pthread_mutex_unlock(&mesa.mutex);
+            break;
+        }
+        int destino = elegir_destino(mesa.tablero, pieza, estado);
+        //Si encontró un movimiento y la cola no esta llena, deja su solicitud
+        if(destino != ninguno && mesa.cola_cantidad < max_solicitudes){
+            int posicion = (mesa.cola_cabeza + mesa.cola_cantidad) % max_solicitudes;
+            mesa.cola[posicion].pieza = pieza;
+            mesa.cola[posicion].destino = destino;
+            mesa.cola_cantidad++;
+            //Despierta al juez, que esta durmiendo esperando solicitudes
+            pthread_cond_signal(&mesa.hay_solicitud);
+        }
+        pthread_mutex_unlock(&mesa.mutex);
+    }
+    return NULL;
+}
+
+//El juez revisa una solicitud, si cumple las reglas de adyacencia y captura, la aplica al tablero y muestra el tablero; si no, la rechaza.
+//Se llama con el mutex de la mesa tomado.
+static void atender_solicitud(Mesa &mesa, Solicitud &s){
+    Tablero &t = mesa.tablero;
+    int origen = t.pos[s.pieza];
+    //Si la pieza ya fue capturada, no hay nada que hacer
+    if(origen == ninguno)
+      return;
+    cout << "[Mesa " << mesa.numero << "] ";
+    imprimir_pieza(s.pieza);
+    if(paso_valido(t, s.pieza, s.destino)){
+        mover_pieza(t, s.pieza, s.destino);
+        cout << " se mueve de " << origen << " a " << s.destino << endl;
+    }
+    else{
+        //Si no es un paso valido, solo el puma puede estar pidiendo un salto
+        int casilla_perro = ninguno;
+        if(s.pieza == 0)
+          casilla_perro = perro_saltado(t, s.destino);
+        if(casilla_perro != ninguno){
+            int perro = t.ocupante[casilla_perro];
+            capturar_perro(t, casilla_perro, s.destino);
+            cout << " salta de " << origen << " a " << s.destino << " y captura al Perro " << perro
+                 << " (capturas: " << t.capturas << ")" << endl;
+        }
+        else{
+            //La casilla se ocupo después de que la pieza la eligió, otra pieza llego antes
+            cout << " queria ir de " << origen << " a " << s.destino << ", pero ya no era posible" << endl;
+            return;
+        }
+    }
+    imprimir_tablero(t);
+}
+
+//Hilo del juez de una mesa; inicializa todo, lanza las piezas, atiende sus solicitudes de a una, detecta al ganador y deja la mesa limpia.
+static void *hilo_juez(void *arg){
+    Mesa &mesa = *(Mesa *)arg;
+
+    //1. Inicializa el tablero y las primitivas de sincronización
+    colocar_inicial(mesa.tablero, mesa.cfg);
+    pthread_mutex_init(&mesa.mutex, NULL);
+    pthread_cond_init(&mesa.hay_solicitud, NULL);
+    mesa.cola_cabeza = 0;
+    mesa.cola_cantidad = 0;
+    mesa.terminada = false;
+    mesa.resultado = SinGanador;
+
+    //2. Lanza un hilo por cada pieza, la 0 es el puma y las 1 a 12 son los perros
+    for(int p = 0; p < num_piezas; p++){
+        mesa.args[p].mesa = &mesa;
+        mesa.args[p].pieza = p;
+        pthread_create(&mesa.hilos[p], NULL, hilo_pieza, &mesa.args[p]);
+    }
+
+    //3. Atiende solicitudes hasta que alguien gane
+    pthread_mutex_lock(&mesa.mutex);
+    cout << "[Mesa " << mesa.numero << "] Comienza la partida" << endl;
+    imprimir_tablero(mesa.tablero);
+    while(!mesa.terminada){
+//Espera pasiva, pthread_cond_wait suelta el mutex mientras duerme (así las piezas pueden dejar solicitudes) y lo vuelve a tomar al despertar. Se repite en un while porque un hilo puede despertar sin que haya nada en la cola.
+        while(mesa.cola_cantidad == 0){
+            pthread_cond_wait(&mesa.hay_solicitud, &mesa.mutex);
+        }
+        //Saca y atiende todas las solicitudes que hay, de la más antigua a la más nueva
+        while(mesa.cola_cantidad > 0 && !mesa.terminada){
+            Solicitud s = mesa.cola[mesa.cola_cabeza];
+            mesa.cola_cabeza = (mesa.cola_cabeza + 1) % max_solicitudes;
+            mesa.cola_cantidad--;
+            atender_solicitud(mesa, s);
+            mesa.resultado = revisar_ganador(mesa.tablero);
+            if(mesa.resultado != SinGanador){
+                mesa.terminada = true;
+            }
+        }
+    }
+    //Se suelta el mutex antes de esperar a las piezas, ellas necesitan tomarlo para darse cuenta de que la partida terminó. Si el juez lo siguiera teniendo mientras espera, nadie avanzaría nunca.
+    pthread_mutex_unlock(&mesa.mutex);
+
+    //4. Espera a que terminen los 13 hilos de las piezas
+    for(int p = 0; p < num_piezas; p++){
+        pthread_join(mesa.hilos[p], NULL);
+    }
+
+    //5. Anuncia el resultado y destruye las primitivas de sincronización
+    cout << "[Mesa " << mesa.numero << "] FIN: ";
+    if(mesa.resultado == GanaPuma)
+      cout << "gana el Puma (capturas: " << mesa.tablero.capturas << ")" << endl;
+    else
+      cout << "ganan los Perros (el Puma quedo acorralado, capturas: " << mesa.tablero.capturas << ")" << endl;
+    pthread_cond_destroy(&mesa.hay_solicitud);
+    pthread_mutex_destroy(&mesa.mutex);
+    return NULL;
+}
