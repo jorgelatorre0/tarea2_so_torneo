@@ -1,0 +1,6 @@
+retardo_min 100
+retardo_max 200
+semilla 777
+abandono 10
+puma 5
+perros 13 14 15 16 17 18 19 20 21 22 23 24
