@@ -501,3 +501,64 @@ static void *hilo_juez(void *arg){
     pthread_mutex_destroy(&mesa.mutex);
     return NULL;
 }
+
+//Valores por defecto, los retardos del enunciado, una semilla distinta en cada ejecución y la disposición inicial por defecto
+static void config_por_defecto(Config &cfg){
+    cfg.retardo_min = retardo_min_defecto;
+    cfg.retardo_max = retardo_max_defecto;
+    cfg.semilla = (unsigned int)time(NULL);
+    cfg.hay_disposicion = false;
+    cfg.casilla_puma = 0;
+    for(int i = 0; i < num_perros; i++){
+        cfg.casillas_perros[i] = 0;
+    }
+}
+
+//Lee config.txt. El formato es una lista de palabras clave, cada una seguida de sus valores , separados por espacios o saltos de linea, en cualquier orden como retardo_min 50, retardo_max 300, semilla 12345, puma 0, perros 13 17 18 19 20 21 22 23 24 25 26 27, Lo que no aparezca en el archivo queda con su valor por defecto.
+//Devuelve false si no se puede abrir o si tiene un error.
+static bool leer_config(const char *ruta, Config &cfg){
+    ifstream archivo(ruta);
+    if(!archivo.is_open()){
+        cout << "Error: no se pudo abrir el archivo de configuracion " << ruta << endl;
+        return false;
+    }
+    string clave;
+    //Lee palabra por palabra; cada palabra clave dice que valores vienen después
+    while(archivo >> clave){
+        if(clave == "retardo_min"){
+            archivo >> cfg.retardo_min;
+        }
+        else if(clave == "retardo_max"){
+            archivo >> cfg.retardo_max;
+        }
+        else if(clave == "semilla"){
+            archivo >> cfg.semilla;
+        }
+        else if(clave == "puma"){
+            archivo >> cfg.casilla_puma;
+            cfg.hay_disposicion = true;
+        }
+        else if(clave == "perros"){
+            for(int i = 0; i < num_perros; i++){
+                archivo >> cfg.casillas_perros[i];
+            }
+            cfg.hay_disposicion = true;
+        }
+        else{
+            cout << "Error: palabra desconocida en el archivo de configuracion: " << clave << endl;
+            return false;
+        }
+    }
+    //Si la lectura se detuvo por un valor que no es un numero, y no por llegar al final del archivo , el archivo esta mal escrito
+    if(archivo.fail() && !archivo.eof()){
+        cout << "Error: valor invalido en el archivo de configuracion" << endl;
+        return false;
+    }
+    //Los retardos tienen que tener sentido
+    if(cfg.retardo_min < 0 || cfg.retardo_max < cfg.retardo_min){
+        cout << "Error: retardo_min no puede ser negativo ni mayor que retardo_max" << endl;
+        return false;
+    }
+    return true;
+}
+
