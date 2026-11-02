@@ -344,8 +344,7 @@ static void imprimir_pieza(int pieza){
       cout << "Perro " << pieza;
 }
 
-//Elige al azar uno de los movimientos validos de la pieza, un paso a una casilla libre si es el puma, también un salto con captura. Devuelve ninguno si no tiene ningún movimiento. "estado" es el generador aleatorio de la pieza.
-//Se llama con el mutex de la mesa tomado, porque lee el tablero.
+//Elige al azar uno de los movimientos validos de la pieza, un paso a una casilla libre si es el puma, también un salto con captura. Devuelve ninguno si no tiene ningún movimiento. "estado" es el generador aleatorio de la pieza. Se llama con el mutex de la mesa tomado, porque lee el tablero.
 static int elegir_destino(Tablero &t, int pieza, unsigned int &estado){
     int origen = t.pos[pieza];
     //Un paso por cada vecina y un salto por cada vecina, a lo más 2 * max_vecinos
@@ -408,8 +407,7 @@ static void *hilo_pieza(void *arg){
     return NULL;
 }
 
-//El juez revisa una solicitud, si cumple las reglas de adyacencia y captura, la aplica al tablero y muestra el tablero; si no, la rechaza.
-//Se llama con el mutex de la mesa tomado.
+//El juez revisa una solicitud, si cumple las reglas de adyacencia y captura, la aplica al tablero y muestra el tablero, si no, la rechaza. Se llama con el mutex de la mesa tomado.
 static void atender_solicitud(Mesa &mesa, Solicitud &s){
     Tablero &t = mesa.tablero;
     int origen = t.pos[s.pieza];
@@ -423,15 +421,14 @@ static void atender_solicitud(Mesa &mesa, Solicitud &s){
         cout << " se mueve de " << origen << " a " << s.destino << endl;
     }
     else{
-        //Si no es un paso valido, solo el puma puede estar pidiendo un salto
+        //Si no es un paso válido, solo el puma puede estar pidiendo un salto
         int casilla_perro = ninguno;
         if(s.pieza == 0)
           casilla_perro = perro_saltado(t, s.destino);
         if(casilla_perro != ninguno){
             int perro = t.ocupante[casilla_perro];
             capturar_perro(t, casilla_perro, s.destino);
-            cout << " salta de " << origen << " a " << s.destino << " y captura al Perro " << perro
-                 << " (capturas: " << t.capturas << ")" << endl;
+            cout << " salta de " << origen << " a " << s.destino << " y captura al Perro " << perro << " (capturas: " << t.capturas << ")" << endl;
         }
         else{
             //La casilla se ocupo después de que la pieza la eligió, otra pieza llego antes
@@ -445,7 +442,6 @@ static void atender_solicitud(Mesa &mesa, Solicitud &s){
 //Hilo del juez de una mesa; inicializa todo, lanza las piezas, atiende sus solicitudes de a una, detecta al ganador y deja la mesa limpia.
 static void *hilo_juez(void *arg){
     Mesa &mesa = *(Mesa *)arg;
-
     //1. Inicializa el tablero y las primitivas de sincronización
     colocar_inicial(mesa.tablero, mesa.cfg);
     pthread_mutex_init(&mesa.mutex, NULL);
@@ -454,51 +450,103 @@ static void *hilo_juez(void *arg){
     mesa.cola_cantidad = 0;
     mesa.terminada = false;
     mesa.resultado = SinGanador;
+    mesa.por_abandono = false;
+    mesa.abandono = ninguno;
+    mesa.ciclos[0] = 0;
+    mesa.ciclos[1] = 0;
+    //Sortea la falla simulada de esta partida: con probabilidad prob_abandono un jugador abandona, y se sortea cual y en cual de sus ciclos. Sale de la semilla, así se repite.
+    unsigned int sorteo = mesa.cfg.semilla + num_piezas;
+    bool habra_falla = (rand_r(&sorteo) % 100) < mesa.cfg.prob_abandono;
+    int rol_falla = rand_r(&sorteo) % 2;
+    mesa.falla_ciclos = 5 + rand_r(&sorteo) % 16;
+    mesa.falla_rol = habra_falla ? rol_falla : ninguno;
 
-    //2. Lanza un hilo por cada pieza, la 0 es el puma y las 1 a 12 son los perros
-    for(int p = 0; p < num_piezas; p++){
-        mesa.args[p].mesa = &mesa;
-        mesa.args[p].pieza = p;
-        pthread_create(&mesa.hilos[p], NULL, hilo_pieza, &mesa.args[p]);
+    //2. Lanza un hilo por cada pieza (la 0 es el puma, las 1 a 12 son los perros)
+    int creadas = 0;
+    while(creadas < num_piezas){
+        mesa.args[creadas].mesa = &mesa;
+        mesa.args[creadas].pieza = creadas;
+        if(pthread_create(&mesa.hilos[creadas], NULL, hilo_pieza, &mesa.args[creadas]) != 0)
+          break;
+        creadas++;
     }
-
-    //3. Atiende solicitudes hasta que alguien gane
-    pthread_mutex_lock(&mesa.mutex);
-    cout << "[Mesa " << mesa.numero << "] Comienza la partida" << endl;
-    imprimir_tablero(mesa.tablero);
-    while(!mesa.terminada){
-//Espera pasiva, pthread_cond_wait suelta el mutex mientras duerme (así las piezas pueden dejar solicitudes) y lo vuelve a tomar al despertar. Se repite en un while porque un hilo puede despertar sin que haya nada en la cola.
-        while(mesa.cola_cantidad == 0){
-            pthread_cond_wait(&mesa.hay_solicitud, &mesa.mutex);
-        }
-        //Saca y atiende todas las solicitudes que hay, de la más antigua a la más nueva
-        while(mesa.cola_cantidad > 0 && !mesa.terminada){
-            Solicitud s = mesa.cola[mesa.cola_cabeza];
-            mesa.cola_cabeza = (mesa.cola_cabeza + 1) % max_solicitudes;
-            mesa.cola_cantidad--;
-            atender_solicitud(mesa, s);
-            mesa.resultado = revisar_ganador(mesa.tablero);
-            if(mesa.resultado != SinGanador){
+    if(creadas == num_piezas){
+        //3. Atiende solicitudes hasta que alguien gane
+        pthread_mutex_lock(&mesa.mutex);
+        pthread_mutex_lock(&mutex_consola);
+        cout << "[Mesa " << mesa.numero << "] Comienza la partida " << mesa.partida << ": Jugador " << mesa.jugador_puma << " (Puma) contra Jugador " << mesa.jugador_perros << " (Perros)" << endl;
+        imprimir_tablero(mesa.tablero);
+        pthread_mutex_unlock(&mutex_consola);
+        while(!mesa.terminada){
+            //Espera pasiva, pthread_cond_wait suelta el mutex mientras duerme (así las piezas pueden dejar solicitudes) y lo vuelve a tomar al despertar. Se repite en un while porque un hilo puede despertar sin que haya nada que atender. Despierta por una solicitud nueva o porque un jugador falló (abandonó).
+            while(mesa.cola_cantidad == 0 && mesa.abandono == ninguno){
+                pthread_cond_wait(&mesa.hay_solicitud, &mesa.mutex);
+            }
+            //Si un jugador falló, el juez lo detecta, aborta la partida y gana su oponente
+            if(mesa.abandono != ninguno){
+                mesa.por_abandono = true;
+                mesa.resultado = (mesa.abandono == 0) ? GananPerros : GanaPuma;
                 mesa.terminada = true;
+                pthread_mutex_lock(&mutex_consola);
+                cout << "[Mesa " << mesa.numero << "] El Jugador " << (mesa.abandono == 0 ? mesa.jugador_puma : mesa.jugador_perros) << " (" << (mesa.abandono == 0 ? "Puma" : "Perros") << ") fallo internamente: se declara ganador a su oponente" << endl;
+                pthread_mutex_unlock(&mutex_consola);
+            }
+            //Saca y atiende todas las solicitudes que hay, de la mas antigua a la mas nueva
+            while(mesa.cola_cantidad > 0 && !mesa.terminada){
+                Solicitud s = mesa.cola[mesa.cola_cabeza];
+                mesa.cola_cabeza = (mesa.cola_cabeza + 1) % max_solicitudes;
+                mesa.cola_cantidad--;
+                atender_solicitud(mesa, s);
+                mesa.resultado = revisar_ganador(mesa.tablero);
+                if(mesa.resultado != SinGanador){
+                    mesa.terminada = true;
+                }
             }
         }
+        //Se suelta el mutex antes de esperar a las piezas: ellas necesitan tomarlo para darse cuenta de que la partida termino.
+        pthread_mutex_unlock(&mesa.mutex);
     }
-    //Se suelta el mutex antes de esperar a las piezas, ellas necesitan tomarlo para darse cuenta de que la partida terminó. Si el juez lo siguiera teniendo mientras espera, nadie avanzaría nunca.
-    pthread_mutex_unlock(&mesa.mutex);
-
+    else{
+        //El sistema no dio hilos suficientes: esta partida no se puede jugar. Se avisa a las piezas que ya se crearon para que terminen.
+        pthread_mutex_lock(&mesa.mutex);
+        mesa.terminada = true;
+        pthread_mutex_unlock(&mesa.mutex);
+        pthread_mutex_lock(&mutex_consola);
+        cout << "[Mesa " << mesa.numero << "] No se pudieron crear los hilos de las piezas: la partida "
+             << mesa.partida << " no se juega" << endl;
+        pthread_mutex_unlock(&mutex_consola);
+    }
     //4. Espera a que terminen los 13 hilos de las piezas
     for(int p = 0; p < num_piezas; p++){
         pthread_join(mesa.hilos[p], NULL);
     }
 
     //5. Anuncia el resultado y destruye las primitivas de sincronización
-    cout << "[Mesa " << mesa.numero << "] FIN: ";
-    if(mesa.resultado == GanaPuma)
-      cout << "gana el Puma (capturas: " << mesa.tablero.capturas << ")" << endl;
-    else
-      cout << "ganan los Perros (el Puma quedo acorralado, capturas: " << mesa.tablero.capturas << ")" << endl;
+    if(creadas == num_piezas){
+        pthread_mutex_lock(&mutex_consola);
+        cout << "[Mesa " << mesa.numero << "] FIN de la partida " << mesa.partida << ": ";
+        if(mesa.por_abandono){
+            if(mesa.resultado == GanaPuma)
+              cout << "gana el Puma, Jugador " << mesa.jugador_puma << ", por abandono del Jugador " << mesa.jugador_perros << " (Perros)" << endl;
+            else
+              cout << "ganan los Perros, Jugador " << mesa.jugador_perros << ", por abandono del Jugador " << mesa.jugador_puma << " (Puma)" << endl;
+        }
+        else if(mesa.resultado == GanaPuma)
+          cout << "gana el Puma, Jugador " << mesa.jugador_puma << " (capturas: " << mesa.tablero.capturas << ")" << endl;
+        else
+          cout << "ganan los Perros, Jugador " << mesa.jugador_perros << " (el Puma quedo acorralado, capturas: " << mesa.tablero.capturas << ")" << endl;
+        pthread_mutex_unlock(&mutex_consola);
+    }
+
     pthread_cond_destroy(&mesa.hay_solicitud);
     pthread_mutex_destroy(&mesa.mutex);
+
+    //6. Libera la mesa. Primero se anota como libre y después se avisa con el semáforo: así, cuando el emparejador despierte, ya va a encontrar la mesa marcada como libre.
+    int indice = mesa.indice;
+    pthread_mutex_lock(&mutex_servidor);
+    mesa_libre[indice] = true;
+    pthread_mutex_unlock(&mutex_servidor);
+    sem_post(&sem_mesas);
     return NULL;
 }
 
@@ -513,6 +561,47 @@ static void config_por_defecto(Config &cfg){
         cfg.casillas_perros[i] = 0;
     }
 }
+
+
+//Servidor, llegada de clientes, emparejamiento y límite de mesas
+
+//Hilo de un jugador: llega al servidor y se anota. Su número de llegada decide su rol: los de llegada par (0, 2, 4, etc) juegan de Puma y los de llegada impar (1, 3, 5, etc) de Perros. La llegada 2p y la 2p+1 forman la partida p.
+static void *hilo_cliente(void *arg){
+    int id = *(int *)arg;
+    //Muchos clientes llegan a la vez: el contador de llegadas se protege con el mutex
+    pthread_mutex_lock(&mutex_servidor);
+    int llegada = llegadas;
+    llegadas++;
+    quien_llego[llegada] = id;
+    //Avisa al emparejador que llego un cliente mas. Se hace con el mutex tomado para que los avisos salgan en el mismo orden de las llegadas
+    sem_post(&sem_llegadas);
+    pthread_mutex_lock(&mutex_consola);
+    cout << "Jugador " << id << " llega al servidor (llegada " << llegada << ": " << (llegada % 2 == 0 ? "Puma" : "Perros") << ")" << endl;
+    pthread_mutex_unlock(&mutex_consola);
+    pthread_mutex_unlock(&mutex_servidor);
+    return NULL;
+}
+
+//El servidor: recibe a los n clientes, los empareja de a 2 y abre una mesa por pareja, sin pasar nunca de m mesas jugando a la vez. Lo ejecuta el hilo principal.
+static void ejecutar_servidor(int n, int m, Config &cfg){
+    //Nunca se usan mas mesas que las que caben en el arreglo (siempre son menos que M)
+    int mesas_max = m;
+    if(mesas_max > max_mesas){
+        mesas_max = max_mesas;
+        cout << "Aviso: se usaran como máximo " << max_mesas << " mesas" << endl;
+    }
+
+    //Inicializa las primitivas del servidor
+    pthread_mutex_init(&mutex_servidor, NULL);
+    pthread_mutex_init(&mutex_consola, NULL);
+    sem_init(&sem_llegadas, 0, 0);
+    sem_init(&sem_mesas, 0, mesas_max);
+    llegadas = 0;
+    for(int i = 0; i < mesas_max; i++){
+        mesa_libre[i] = true;
+        mesas[i].hilo_lanzado = false;
+    }
+ 
 
 //Lee config.txt. El formato es una lista de palabras clave, cada una seguida de sus valores , separados por espacios o saltos de linea, en cualquier orden como retardo_min 50, retardo_max 300, semilla 12345, puma 0, perros 13 17 18 19 20 21 22 23 24 25 26 27, Lo que no aparezca en el archivo queda con su valor por defecto.
 //Devuelve false si no se puede abrir o si tiene un error.
