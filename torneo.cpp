@@ -572,15 +572,21 @@ static void *hilo_juez(void *arg){
              << mesa.partida << " no se juega" << endl;
         pthread_mutex_unlock(&mutex_consola);
     }
-    //4. Espera a que terminen los 13 hilos de las piezas
-    for(int p = 0; p < num_piezas; p++){
+    //4. Espera a que terminen los hilos de las piezas que se crearon
+    for(int p = 0; p < creadas; p++){
         pthread_join(mesa.hilos[p], NULL);
     }
-
     //5. Anuncia el resultado y destruye las primitivas de sincronización
-    if(creadas == num_piezas){
+    
+    //Si la partida terminó sin ganador es porque la cortó el SIGINT
+    if(creadas == num_piezas && mesa.resultado == SinGanador){
         pthread_mutex_lock(&mutex_consola);
-        cout << "[Mesa " << mesa.numero << "] FIN de la partida " << mesa.partida << ": ";
+        cout << "[Mesa " << mesa.numero << "] La partida " << mesa.partida << " se interrumpió por SIGINT (no hay ganador)" << endl;
+        pthread_mutex_unlock(&mutex_consola);
+    }
+    else if(creadas == num_piezas){
+        pthread_mutex_lock(&mutex_consola);
+        cout << "[Mesa " << mesa.numero << "] Fin de la partida " << mesa.partida << ": ";
         if(mesa.por_abandono){
             if(mesa.resultado == GanaPuma)
               cout << "gana el Puma, Jugador " << mesa.jugador_puma << ", por abandono del Jugador " << mesa.jugador_perros << " (Perros)" << endl;
@@ -616,8 +622,8 @@ static void config_por_defecto(Config &cfg){
     for(int i = 0; i < num_perros; i++){
         cfg.casillas_perros[i] = 0;
     }
+    cfg.prob_abandono = abandono_defecto;
 }
-
 
 //Servidor, llegada de clientes, emparejamiento y límite de mesas
 
@@ -657,9 +663,20 @@ static void ejecutar_servidor(int n, int m, Config &cfg){
         mesa_libre[i] = true;
         mesas[i].hilo_lanzado = false;
     }
-     //Llegan los n clientes, todos a la vez (un hilo por cliente)
+        for(int i = 0; i < mesas_max; i++){
+        mesa_libre[i] = true;
+        mesas[i].hilo_lanzado = false;
+    }
+    //Instala el handler de SIGINT (Ctrl+C), ya con los semáforos inicializados. Sin SA_RESTART para que el sem_wait se interrumpa con la señal
+    struct sigaction accion;
+    accion.sa_handler = manejar_sigint;
+    sigemptyset(&accion.sa_mask);
+    accion.sa_flags = 0;
+    sigaction(SIGINT, &accion, NULL);
+     //Llegan los n clientes, todos a la vez 
+     //Llegan los n clientes, todos a la vez 
     int clientes = 0;
-    while(clientes < n){
+    while(clientes < n && !interrumpido){
         ids_clientes[clientes] = clientes;
         if(pthread_create(&hilos_clientes[clientes], NULL, hilo_cliente, &ids_clientes[clientes]) != 0){
             cout << "Error: el sistema no permite crear mas hilos. Solo llegaron " << clientes << " de " << n << " clientes" << endl;
@@ -670,18 +687,24 @@ static void ejecutar_servidor(int n, int m, Config &cfg){
 
     //Empareja de a 2 clientes (2p y 2p+1) y abre una mesa por pareja
     int partidas = clientes / 2;
-    for(int p = 0; p < partidas; p++){
+    for(int p = 0; p < partidas && !interrumpido; p++){
         //Espera pasiva hasta que hayan llegado los dos clientes de esta pareja
         sem_wait(&sem_llegadas);
         sem_wait(&sem_llegadas);
+        //Si el sem_wait despertó por SIGINT, no se sigue emparejando
+        if(interrumpido)
+          break;
         int jugador_puma = quien_llego[2 * p];
         int jugador_perros = quien_llego[2 * p + 1];
         pthread_mutex_lock(&mutex_consola);
         cout << "Partida " << p + 1 << ": Jugador " << jugador_puma << " (Puma) y Jugador " << jugador_perros << " (Perros) esperan una mesa" << endl;
         pthread_mutex_unlock(&mutex_consola);
 
-        //Espera pasiva hasta que haya una mesa libre. El semáforo parte en M, asi que nunca puede haber más de M mesas jugando. Si están todas ocupadas, aquí se duerme.
+        //Espera pasiva hasta que haya una mesa libre. El semáforo parte en M, así que nunca puede haber más de M mesas jugando. Si están todas ocupadas, aquí se duerme.
         sem_wait(&sem_mesas);
+        //Si el sem_wait despertó por SIGINT, no se abre otra mesa
+        if(interrumpido)
+          break;
 
         //Busca la mesa libre (el semáforo asegura que hay al menos una)
         pthread_mutex_lock(&mutex_servidor);
