@@ -53,7 +53,7 @@ Formato de config.txt, lista de palabras clave, cada una seguida de su(s) valor(
 - perros: casillas iniciales de los 12 perros. Por defecto 13, 17, 18 a 27.
 - abandono: probabilidad (0 a 100) de que un jugador abandone una partida. Por defecto 10.
 
-Lo que no aparezca en el archivo queda con su valor por defecto. Si se entrega "puma" o "perros", la disposición completa del archivo reemplaza a la de por defecto y debe ser válida (casillas existentes y sin repetir).
+Lo que no aparezca en el archivo queda con su valor por defecto, con una excepción: la disposición inicial. Si se entrega "puma" o "perros", hay que entregar ambos, porque la disposición del archivo reemplaza por completo a la de por defecto. Si falta uno, sus casillas quedan en 0 y el programa lo rechaza como disposicición inválida. La disposición debe ser válida (casillas existentes y sin repetir).
 
 Ejemplo:
 
@@ -61,7 +61,7 @@ Ejemplo:
 
 Con este comando llegan 40 jugadores, se forman 20 partidas y nunca hay más de 4 mesas jugando a la vez. Las demás parejas esperan a que se libere una mesa.
 
-Como probar el abandono: ejecutar con "abandono 100" en config.txt. En cada partida un jugador falla entre su ciclo de decisión 5 y 20, y el juez declara ganador a su oponente.
+Como probar el abandono: ejecutar con "abandono 100" en config.txt. En cada partida un jugador falla entre su ciclo de decisión 5 y 20, y el juez declara ganador a su oponente (si la partida termina antes de ese ciclo, nadie llega a fallar).
 
 Como probar la interrupción: ejecutar "./torneo 40 2" y presionar Ctrl+C durante la ejecución. Las partidas activas terminan con el mensaje "se interrumpió por SIGINT" y al final se imprime "Todas las partidas terminaron".
 
@@ -86,16 +86,15 @@ Tablero y reglas:
 
 Mesa (piezas y juez):
 - elegir_destino: elige al azar uno de los movimientos válidos de una pieza (paso o, si es el puma, salto con captura).
-- turno_de_pieza: lo que hace una pieza en un ciclo con el mutex de la mesa tomado: revisa si debe terminar, cuenta el ciclo, falla si le toca y deja una solicitud en la cola.
 - soltar_mutex: cleanup handler que suelta el mutex si un hilo muere con él tomado.
-- hilo_pieza: hilo de una pieza. Repite: esperar un retardo aleatorio y ejecutar su turno con el mutex tomado.
-- atender_solicitud: el juez revisa una solicitud y, si cumple las reglas, la aplica y muestra el tablero; si no, la rechaza.
+- hilo_pieza: hilo de una pieza. Repite: esperar un retardo aleatorio, tomar el mutex de la mesa, revisar si debe terminar (partida terminada, pieza capturada o SIGINT), contar su ciclo de decisión, fallar si le toca (abandono) y dejar una solicitud de movimiento en la cola.
+- atender_solicitud: el juez revisa una solicitud y, si cumple las reglas, la aplica y muestra el tablero; si no, la rechaza. Se llama con el mutex de la mesa y el de la consola tomados.
 - hilo_juez: hilo del juez. Inicializa la mesa, lanza las 13 piezas, atiende solicitudes, detecta al ganador o al abandono, espera a las piezas, anuncia el resultado, destruye las primitivas de la mesa y la libera.
 
 Servidor:
 - hilo_cliente: hilo de un jugador. Se anota en el orden de llegada (llegada par = Puma, impar = Perros) y avisa con un semáforo.
 - ejecutar_servidor: crea los clientes, empareja de a 2 (llegadas 2p y 2p+1), espera una mesa libre, lanza el juez de cada partida y al final espera a todos los hilos y destruye las primitivas.
-- manejador_seremi / manejar_sigint: manejador de SIGINT (Ctrl+C). Solo marca una bandera y despierta al hilo principal con sem_post.
+- manejar_sigint: manejador de SIGINT (Ctrl+C). Solo marca una bandera y despierta al hilo principal con sem_post.
 
 Configuración y main:
 - config_por_defecto: asigna los valores por defecto.
@@ -124,8 +123,11 @@ Con probabilidad "abandono" se sortea en cada partida un jugador que falla, y en
 Interrupción del servidor (Ctrl+C):
 El manejador de SIGINT (instalado con sigaction, sin SA_RESTART) solo marca una variable volatile sig_atomic_t y hace sem_post a los dos semáforos, para despertar al hilo principal si estaba dormido. El servidor deja de crear clientes y de emparejar. Cada pieza ve la bandera, avisa al juez con pthread_cond_signal y termina. El juez marca la partida como terminada sin ganador, hace join de sus piezas, destruye sus primitivas y libera la mesa. Al final el servidor hace join de todos los hilos y destruye los semáforos y mutex. Las parejas que estaban esperando mesa no juegan.
 
+Salida por consola:
+El mutex de la consola se toma cada vez que se imprime un mensaje, incluido el que lleva el tablero, para que la salida de distintas mesas no se mezcle.
+
 Reproducibilidad:
-La semilla de cada partida es semilla + 100 x (número de partida) y la de cada pieza es la semilla de la partida + el número de pieza. Con la misma semilla se repiten los sorteos (abandonos y elecciones de movimiento), pero el orden exacto de los hilos depende del planificador del sistema operativo, por lo que las partidas completas pueden variar entre ejecuciones.
+La semilla de cada partida es semilla + 100 x (número de partida - 1) y la de cada pieza es la semilla de la partida + el número de pieza. Con la misma semilla se repiten los sorteos (abandonos y elecciones de movimiento), pero el orden exacto de los hilos depende del planificador del sistema operativo, por lo que las partidas completas pueden variar entre ejecuciones.
 
 Evaluación (complejidad, rendimiento y concurrencia):
 Un solo juez por mesa que atiende solicitudes hace la solución simple de razonar y evita bloqueos entre piezas, a cambio de que los movimientos de una misma mesa se validan de a uno. Esto no es un problema real porque las piezas se mueven cada 50 a 300 ms. Entre mesas sí hay concurrencia total, ya que cada una tiene su propio mutex y su propia variable de condición, y solo comparten la consola y el servidor, que se toman por muy poco tiempo.
