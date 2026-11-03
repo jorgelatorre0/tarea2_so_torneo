@@ -618,18 +618,112 @@ static void ejecutar_servidor(int n, int m, Config &cfg){
         mesa_libre[i] = true;
         mesas[i].hilo_lanzado = false;
     }
- 
+     //Llegan los n clientes, todos a la vez (un hilo por cliente)
+    int clientes = 0;
+    while(clientes < n){
+        ids_clientes[clientes] = clientes;
+        if(pthread_create(&hilos_clientes[clientes], NULL, hilo_cliente, &ids_clientes[clientes]) != 0){
+            cout << "Error: el sistema no permite crear mas hilos. Solo llegaron " << clientes << " de " << n << " clientes" << endl;
+            break;
+        }
+        clientes++;
+    }
 
-//Lee config.txt. El formato es una lista de palabras clave, cada una seguida de sus valores , separados por espacios o saltos de linea, en cualquier orden como retardo_min 50, retardo_max 300, semilla 12345, puma 0, perros 13 17 18 19 20 21 22 23 24 25 26 27, Lo que no aparezca en el archivo queda con su valor por defecto.
-//Devuelve false si no se puede abrir o si tiene un error.
+    //Empareja de a 2 clientes (2p y 2p+1) y abre una mesa por pareja
+    int partidas = clientes / 2;
+    for(int p = 0; p < partidas; p++){
+        //Espera pasiva hasta que hayan llegado los dos clientes de esta pareja
+        sem_wait(&sem_llegadas);
+        sem_wait(&sem_llegadas);
+        int jugador_puma = quien_llego[2 * p];
+        int jugador_perros = quien_llego[2 * p + 1];
+        pthread_mutex_lock(&mutex_consola);
+        cout << "Partida " << p + 1 << ": Jugador " << jugador_puma << " (Puma) y Jugador " << jugador_perros << " (Perros) esperan una mesa" << endl;
+        pthread_mutex_unlock(&mutex_consola);
+
+        //Espera pasiva hasta que haya una mesa libre. El semáforo parte en M, asi que nunca puede haber más de M mesas jugando. Si están todas ocupadas, aquí se duerme.
+        sem_wait(&sem_mesas);
+
+        //Busca la mesa libre (el semáforo asegura que hay al menos una)
+        pthread_mutex_lock(&mutex_servidor);
+        int s = 0;
+        while(!mesa_libre[s]){
+            s++;
+        }
+        mesa_libre[s] = false;
+        pthread_mutex_unlock(&mutex_servidor);
+
+        //Si en esta mesa ya se jugó una partida, se espera a que su hilo juez termine del todo
+        if(mesas[s].hilo_lanzado){
+            pthread_join(mesas[s].hilo_juez, NULL);
+            mesas[s].hilo_lanzado = false;
+        }
+        //Prepara la mesa. La semilla cambia en cada partida para que no sean todas iguales.
+        mesas[s].numero = s + 1;
+        mesas[s].indice = s;
+        mesas[s].partida = p + 1;
+        mesas[s].jugador_puma = jugador_puma;
+        mesas[s].jugador_perros = jugador_perros;
+        mesas[s].cfg = cfg;
+        mesas[s].cfg.semilla = cfg.semilla + 100 * p;
+        pthread_mutex_lock(&mutex_consola);
+        cout << "Partida " << p + 1 << " asignada a la Mesa " << s + 1 << endl;
+        pthread_mutex_unlock(&mutex_consola);
+
+        //Abre la mesa, lanza su hilo juez
+        if(pthread_create(&mesas[s].hilo_juez, NULL, hilo_juez, &mesas[s]) == 0){
+            mesas[s].hilo_lanzado = true;
+        }
+        else{
+            //Si no se pudo crear el juez, la partida no se juega y la mesa queda libre
+            pthread_mutex_lock(&mutex_consola);
+            cout << "Error: no se pudo crear el hilo juez, la partida " << p + 1 << " no se juega" << endl;
+            pthread_mutex_unlock(&mutex_consola);
+            pthread_mutex_lock(&mutex_servidor);
+            mesa_libre[s] = true;
+            pthread_mutex_unlock(&mutex_servidor);
+            sem_post(&sem_mesas);
+        }
+    }
+
+    //Si N es impar, el ultimo cliente se queda sin rival y no juega
+    if(clientes % 2 == 1){
+        sem_wait(&sem_llegadas);
+        pthread_mutex_lock(&mutex_consola);
+        cout << "Jugador " << quien_llego[clientes - 1] << " (llegada " << clientes - 1 << ") se queda sin rival y no juega" << endl;
+        pthread_mutex_unlock(&mutex_consola);
+    }
+
+    //Espera a que terminen todas las partidas
+    for(int i = 0; i < mesas_max; i++){
+        if(mesas[i].hilo_lanzado){
+            pthread_join(mesas[i].hilo_juez, NULL);
+            mesas[i].hilo_lanzado = false;
+        }
+    }
+    //Espera a los hilos de los clientes (si todos se anotaron)
+    for(int i = 0; i < clientes; i++){
+        pthread_join(hilos_clientes[i], NULL);
+    }
+
+    //Destruye las primitivas del servidor
+    sem_destroy(&sem_llegadas);
+    sem_destroy(&sem_mesas);
+    pthread_mutex_destroy(&mutex_servidor);
+    pthread_mutex_destroy(&mutex_consola);
+    cout << "Todas las partidas terminaron" << endl;
+}
+
+
+//Lee config.txt. Lo que no aparezca en el archivo queda con su valor por defecto. Devuelve false si no se puede abrir o si tiene un error.
 static bool leer_config(const char *ruta, Config &cfg){
     ifstream archivo(ruta);
     if(!archivo.is_open()){
-        cout << "Error: no se pudo abrir el archivo de configuracion " << ruta << endl;
+        cout << "Error: no se pudo abrir el archivo de configuración " << ruta << endl;
         return false;
     }
     string clave;
-    //Lee palabra por palabra; cada palabra clave dice que valores vienen después
+    //Lee palabra por palabra, cada palabra clave dice que valores vienen después
     while(archivo >> clave){
         if(clave == "retardo_min"){
             archivo >> cfg.retardo_min;
@@ -639,6 +733,9 @@ static bool leer_config(const char *ruta, Config &cfg){
         }
         else if(clave == "semilla"){
             archivo >> cfg.semilla;
+        }
+        else if(clave == "abandono"){
+            archivo >> cfg.prob_abandono;
         }
         else if(clave == "puma"){
             archivo >> cfg.casilla_puma;
@@ -651,7 +748,7 @@ static bool leer_config(const char *ruta, Config &cfg){
             cfg.hay_disposicion = true;
         }
         else{
-            cout << "Error: palabra desconocida en el archivo de configuracion: " << clave << endl;
+            cout << "Error: palabra desconocida en el archivo de configuración: " << clave << endl;
             return false;
         }
     }
