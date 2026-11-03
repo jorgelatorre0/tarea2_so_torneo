@@ -436,7 +436,7 @@ static void *hilo_pieza(void *arg){
         //Cuenta un ciclo de decisión de su jugador (0 = Puma, 1 = Perros)
         int rol = (pieza == 0) ? 0 : 1;
         mesa.ciclos[rol]++;
-        //Si este jugador es el que debe fallar y llegó su ciclo, el hilo avisa al juez y   muere con el mutex todavía tomado. El cleanup handler lo suelta. El pop(0) solo cierra el push cuando no hubo falla.
+        //Si este jugador es el que debe fallar y llegó su ciclo, el hilo avisa al juez y muere con el mutex todavía tomado. El cleanup handler lo suelta. El pop(0) solo cierra el push cuando no hubo falla.
         pthread_cleanup_push(soltar_mutex, &mesa.mutex);
         if(mesa.falla_rol == rol && mesa.ciclos[rol] == mesa.falla_ciclos){
             mesa.abandono = rol;
@@ -552,7 +552,9 @@ static void *hilo_juez(void *arg){
                 Solicitud s = mesa.cola[mesa.cola_cabeza];
                 mesa.cola_cabeza = (mesa.cola_cabeza + 1) % max_solicitudes;
                 mesa.cola_cantidad--;
+                pthread_mutex_lock(&mutex_consola);
                 atender_solicitud(mesa, s);
+                pthread_mutex_unlock(&mutex_consola);
                 mesa.resultado = revisar_ganador(mesa.tablero);
                 if(mesa.resultado != SinGanador){
                     mesa.terminada = true;
@@ -568,8 +570,7 @@ static void *hilo_juez(void *arg){
         mesa.terminada = true;
         pthread_mutex_unlock(&mesa.mutex);
         pthread_mutex_lock(&mutex_consola);
-        cout << "[Mesa " << mesa.numero << "] No se pudieron crear los hilos de las piezas: la partida "
-             << mesa.partida << " no se juega" << endl;
+        cout << "[Mesa " << mesa.numero << "] No se pudieron crear los hilos de las piezas: la partida " << mesa.partida << " no se juega" << endl;
         pthread_mutex_unlock(&mutex_consola);
     }
     //4. Espera a que terminen los hilos de las piezas que se crearon
@@ -663,17 +664,12 @@ static void ejecutar_servidor(int n, int m, Config &cfg){
         mesa_libre[i] = true;
         mesas[i].hilo_lanzado = false;
     }
-        for(int i = 0; i < mesas_max; i++){
-        mesa_libre[i] = true;
-        mesas[i].hilo_lanzado = false;
-    }
     //Instala el handler de SIGINT (Ctrl+C), ya con los semáforos inicializados. Sin SA_RESTART para que el sem_wait se interrumpa con la señal
     struct sigaction accion;
     accion.sa_handler = manejar_sigint;
     sigemptyset(&accion.sa_mask);
     accion.sa_flags = 0;
     sigaction(SIGINT, &accion, NULL);
-     //Llegan los n clientes, todos a la vez 
      //Llegan los n clientes, todos a la vez 
     int clientes = 0;
     while(clientes < n && !interrumpido){
@@ -749,7 +745,7 @@ static void ejecutar_servidor(int n, int m, Config &cfg){
     }
 
     //Si N es impar, el ultimo cliente se queda sin rival y no juega
-    if(clientes % 2 == 1){
+    if(clientes % 2 == 1 && !interrumpido){
         sem_wait(&sem_llegadas);
         pthread_mutex_lock(&mutex_consola);
         cout << "Jugador " << quien_llego[clientes - 1] << " (llegada " << clientes - 1 << ") se queda sin rival y no juega" << endl;
@@ -816,7 +812,7 @@ static bool leer_config(const char *ruta, Config &cfg){
     }
     //Si la lectura se detuvo por un valor que no es un numero, y no por llegar al final del archivo , el archivo esta mal escrito
     if(archivo.fail() && !archivo.eof()){
-        cout << "Error: valor invalido en el archivo de configuracion" << endl;
+        cout << "Error: valor inválido en el archivo de configuración" << endl;
         return false;
     }
     //Los retardos tienen que tener sentido
