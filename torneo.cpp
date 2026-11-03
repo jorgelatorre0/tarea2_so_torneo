@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <signal.h>
+#include <semaphore.h>
 using namespace std;
 
 //Tablero y reglas
@@ -33,6 +34,12 @@ using namespace std;
 #define retardo_max_defecto 300
 //Solicitudes de movimiento que caben esperando en la cola de una mesa
 #define max_solicitudes 32
+//Probabilidad por defecto (en %) de que un jugador abandone una partida
+#define abandono_defecto 10
+//Máximo de mesas que se pueden crear 
+#define max_mesas 1000
+//Máximo de jugadores que acepta el servidor
+#define max_jugadores 100000
 
 static const int lineas[num_lineas][largo_linea]={{3, 4, 5, 6, 7, -1},{8, 9, 10, 11, 12, -1},{13, 14, 15, 16, 17, -1},{18, 19, 20, 21, 22, -1},{23, 24, 25, 26, 27, -1},{3, 8, 13, 18, 23, -1},{1, 4, 9, 14, 19, 24, -1},{0, 5, 10, 15, 20, 25, -1},{2, 6, 11, 16, 21, 26, -1},{7, 12, 17, 22, 27, -1},{0, 1, 3, -1},{0, 2, 7, -1},{1, 2, -1}};
 
@@ -71,6 +78,8 @@ struct Config{
     //Casilla inicial del puma y de cada uno de los 12 perros
     int casilla_puma;
     int casillas_perros[num_perros];
+    //Probabilidad de que en una partida un jugador abandone
+    int prob_abandono;
 };
 
 //Una solicitud de movimiento, una pieza pide ir a una casilla
@@ -121,6 +130,17 @@ struct Mesa{
     //Los 13 hilos de las piezas y los argumentos que recibe cada uno
     pthread_t hilos[num_piezas];
     ArgPieza args[num_piezas];
+    //true si el ganador lo es porque su oponente abandonó
+    bool por_abandono;
+    //Falla simulada de esta partida. Roles: 0 = jugador Puma, 1 = jugador Perros.
+    //falla_rol: el rol que va a fallar (ninguno si en esta partida nadie falla)
+    int falla_rol;
+    //falla_ciclos: en cuál de sus ciclos de decisión falla ese rol
+    int falla_ciclos;
+    //ciclos[r]: cuántos ciclos de decisión ha hecho el rol 
+    int ciclos[2];
+    //abandono, el rol que falló 
+    int abandono;
 };
 
 //Datos del servidor compartidos por todos los hilos
@@ -382,6 +402,10 @@ static int elegir_destino(Tablero &t, int pieza, unsigned int &estado){
     //rand_r usa el estado, asi cada pieza tiene su propia secuencia
     return candidatos[rand_r(&estado) % cantidad];
 }
+//Se ejecuta cuando un hilo termina teniendo el mutex tomado, lo suelta. Así, si un jugador falla en medio de una sección crítica, la mesa no se bloquea.
+static void soltar_mutex(void *mutex){
+    pthread_mutex_unlock((pthread_mutex_t *)mutex);
+}
 
 //Hilo de una pieza. Esperar un retardo aleatorio, elige un movimiento y PEDIR al juez que lo haga (poniendo una solicitud en la cola). La pieza nunca modifica el tablero, solo lo hace el juez.
 static void *hilo_pieza(void *arg){
@@ -409,6 +433,17 @@ static void *hilo_pieza(void *arg){
                 pthread_mutex_unlock(&mesa.mutex);
                 break;
         }
+        //Cuenta un ciclo de decisión de su jugador (0 = Puma, 1 = Perros)
+        int rol = (pieza == 0) ? 0 : 1;
+        mesa.ciclos[rol]++;
+        //Si este jugador es el que debe fallar y llegó su ciclo, el hilo avisa al juez y   muere con el mutex todavía tomado. El cleanup handler lo suelta. El pop(0) solo cierra el push cuando no hubo falla.
+        pthread_cleanup_push(soltar_mutex, &mesa.mutex);
+        if(mesa.falla_rol == rol && mesa.ciclos[rol] == mesa.falla_ciclos){
+            mesa.abandono = rol;
+            pthread_cond_signal(&mesa.hay_solicitud);
+            pthread_exit(NULL);
+        }
+        pthread_cleanup_pop(0);
         int destino = elegir_destino(mesa.tablero, pieza, estado);
         //Si encontró un movimiento y la cola no esta llena, deja su solicitud
         if(destino != ninguno && mesa.cola_cantidad < max_solicitudes){
@@ -496,8 +531,12 @@ static void *hilo_juez(void *arg){
         pthread_mutex_unlock(&mutex_consola);
         while(!mesa.terminada){
             //Espera pasiva, pthread_cond_wait suelta el mutex mientras duerme (así las piezas pueden dejar solicitudes) y lo vuelve a tomar al despertar. Se repite en un while porque un hilo puede despertar sin que haya nada que atender. Despierta por una solicitud nueva o porque un jugador falló (abandonó).
-            while(mesa.cola_cantidad == 0 && mesa.abandono == ninguno){
+            while(mesa.cola_cantidad == 0 && mesa.abandono == ninguno && !interrumpido){
                 pthread_cond_wait(&mesa.hay_solicitud, &mesa.mutex);
+            }
+            //Si llegó SIGINT, la partida se da por terminada
+            if(interrumpido){
+                mesa.terminada = true;
             }
             //Si un jugador falló, el juez lo detecta, aborta la partida y gana su oponente
             if(mesa.abandono != ninguno){
@@ -765,3 +804,45 @@ static bool leer_config(const char *ruta, Config &cfg){
     return true;
 }
 
+int main(int argc, char *argv[]){
+    //Se invoca como: ./torneo N M [config.txt]
+    if(argc != 3 && argc != 4){
+        cout << "Uso: " << argv[0] << " N M [config.txt]" << endl;
+        return 1;
+    }
+    //N: cantidad de jugadores. M: máximo de mesas jugando al mismo tiempo
+    int n = atoi(argv[1]);
+    int m = atoi(argv[2]);
+    if(n <= 0 || m <= 0){
+        cout << "Error: N y M deben ser enteros positivos" << endl;
+        return 1;
+    }
+    //Los arreglos del servidor tienen capacidad para max_jugadores
+    if(n > max_jugadores){
+        cout << "Error: N no puede ser mayor que " << max_jugadores << endl;
+        return 1;
+    }
+    //Parte con los valores por defecto y, si se pasó un archivo, los reemplaza
+    Config cfg;
+    config_por_defecto(cfg);
+    if(argc == 4){
+        if(!leer_config(argv[3], cfg))
+          return 1;
+    }
+    //Arma las tablas de vecinos y saltos 
+    construir_tablero();
+    //Arma la disposición inicial una vez, para comprobar que es válida
+    Tablero t;
+    if(!colocar_inicial(t, cfg)){
+        cout << "Error: la disposición inicial no es válida (casilla que no existe o repetida)" << endl;
+        return 1;
+    }
+    cout << "Torneo: " << n << " jugadores, máximo " << m << " mesas simultáneas" << endl;
+    cout << "Retardo por movimiento: " << cfg.retardo_min << " a " << cfg.retardo_max << " ms" << endl;
+    cout << "Semilla: " << cfg.semilla << endl;
+    cout << endl;
+
+    //El servidor recibe a los N jugadores, los empareja y abre las mesas 
+    ejecutar_servidor(n, m, cfg);
+    return 0;
+}
