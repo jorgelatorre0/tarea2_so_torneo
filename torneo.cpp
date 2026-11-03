@@ -5,6 +5,7 @@
 #include <ctime>
 #include <pthread.h>
 #include <unistd.h>
+#include <signal.h>
 using namespace std;
 
 //Tablero y reglas
@@ -144,6 +145,16 @@ static Mesa mesas[max_mesas];
 //Numero de cada cliente y su hilo
 static int ids_clientes[max_jugadores];
 static pthread_t hilos_clientes[max_jugadores];
+
+//Vale 1 cuando el usuario presiono Ctrl+C
+static volatile sig_atomic_t interrumpido = 0;
+
+//Solo marca la bandera y despierta al hilo principal con sem_post, por si esta dormido en un sem_wait
+static void manejar_sigint(int){
+    interrumpido = 1;
+    sem_post(&sem_llegadas);
+    sem_post(&sem_mesas);
+}
 
 //Construcción de las tablas del tablero
 
@@ -391,6 +402,12 @@ static void *hilo_pieza(void *arg){
         if(mesa.terminada || mesa.tablero.pos[pieza] == ninguno){
             pthread_mutex_unlock(&mesa.mutex);
             break;
+        }
+        //Si llega SIGINT, la pieza avisa al juez y termina
+            if(interrumpido){
+                pthread_cond_signal(&mesa.hay_solicitud);
+                pthread_mutex_unlock(&mesa.mutex);
+                break;
         }
         int destino = elegir_destino(mesa.tablero, pieza, estado);
         //Si encontró un movimiento y la cola no esta llena, deja su solicitud
